@@ -5,7 +5,22 @@ import torch
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
-from transformers.cache_utils import _static_cache_update
+try:
+    from transformers.cache_utils import _static_cache_update
+except ImportError:
+    # transformers < 4.52 has no _static_cache_update; equivalent in-place update.
+    def _static_cache_update(k_cache, v_cache, key_states, value_states, cache_position):
+        if cache_position is None:
+            k_cache.copy_(key_states)
+            v_cache.copy_(value_states)
+        else:
+            try:
+                k_cache.index_copy_(2, cache_position, key_states)
+                v_cache.index_copy_(2, cache_position, value_states)
+            except NotImplementedError:
+                k_cache[:, :, cache_position] = key_states
+                v_cache[:, :, cache_position] = value_states
+        return k_cache, v_cache
 
 logger = logging.get_logger(__name__)
 

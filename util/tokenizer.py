@@ -2,14 +2,12 @@ import os
 
 from transformers import AutoTokenizer
 
-if "wandb_mode" not in os.environ:
-    local_files_only = True
-else:
-    local_files_only = os.environ["WANDB_MODE"] == "offline"
+from paths import MODEL_DIR
 
+# Tokenizer files are vendored under MODEL_DIR (no hub access on cluster nodes).
 TOKENIZERS = {
-    "smollm": AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM-135M", local_files_only=local_files_only),
-    "smollm2": AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM2-135M", local_files_only=local_files_only),
+    "smollm": AutoTokenizer.from_pretrained(os.path.join(MODEL_DIR, "SmolLM-135M")),
+    "smollm2": AutoTokenizer.from_pretrained(os.path.join(MODEL_DIR, "SmolLM2-135M")),
 }
 
 

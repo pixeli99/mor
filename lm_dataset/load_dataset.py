@@ -12,13 +12,17 @@ from paths import DATA_DIR
 
 num_proc = 24
 
+# Local fineweb-edu sample-10BT parquet shards. Shard 013 is the held-out val
+# split (fineweb_test); it must never appear in the training stream.
+FINEWEB_EDU_10BT = "/jfs/auto.prod.sz/data/ann/vlf/data/pengxiang.li/fineweb_edu/sample/10BT"
+
 # arguments for the load_dataset function
 LM_DATASETS = {
     "slimpajama": {"path": f"{DATA_DIR}/slimpajama", "split": "train"},
     "slimpajama_chunk1": {"path": "json", "data_files": f"{DATA_DIR}/slimpajama_chunk1/*.jsonl", "split": "train"},
     "cosmopedia": {"path": f"{DATA_DIR}/cosmopedia-v2", "split": "train"},
-    "fineweb_edu": {"path": f"{DATA_DIR}/fineweb-edu-dedup", "split": "train"},
-    "fineweb_test": {"path": f"{DATA_DIR}/fineweb-test", "split": "train"},
+    "fineweb_edu": {"path": "parquet", "data_files": [f"{FINEWEB_EDU_10BT}/{i:03d}_00000.parquet" for i in range(13)], "split": "train"},
+    "fineweb_test": {"path": "parquet", "data_files": [f"{FINEWEB_EDU_10BT}/013_00000.parquet"], "split": "train"},
     "python_edu": {"path": f"{DATA_DIR}/python-edu", "split": "train"},
     "open_web_math": {"path": f"{DATA_DIR}/open-web-math", "split": "train"}, 
     "math_code_pile": {"path": f"{DATA_DIR}/math-code-pile", "split": "train"}, 

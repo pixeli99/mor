@@ -13,10 +13,16 @@ from torch.utils.tensorboard import SummaryWriter
 from transformers import TrainerCallback, TrainingArguments, TrainerState, TrainerControl
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 
-import lm_eval
-from lm_eval import evaluator, utils
-from lm_eval.tasks import TaskManager
-from lm_eval.utils import make_table
+# lm_eval pulls in vllm at import time, which conflicts with this node's
+# transformers install; only EvalCallback needs it, so import lazily there.
+try:
+    import lm_eval
+    from lm_eval import evaluator, utils
+    from lm_eval.tasks import TaskManager
+    from lm_eval.utils import make_table
+except ImportError as _lm_eval_err:
+    lm_eval = None
+    _LM_EVAL_IMPORT_ERROR = _lm_eval_err
 from transformers.trainer_callback import CallbackHandler
 
 
@@ -42,6 +48,8 @@ class EvalCallback(TrainerCallback):
     """
     def __init__(self, cfg, tokenizer) -> None:
         super().__init__()
+        if lm_eval is None:
+            raise ImportError("EvalCallback requires lm_eval, which failed to import") from _LM_EVAL_IMPORT_ERROR
         self.cfg = cfg
         self.tokenizer = tokenizer
         if self.cfg.get("tensorboard"):
