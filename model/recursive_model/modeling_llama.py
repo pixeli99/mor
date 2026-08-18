@@ -72,7 +72,13 @@ class LlamaModel(LlamaPreTrainedModel):
         self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.rotary_emb = LlamaRotaryEmbedding(config=config)
         self.gradient_checkpointing = False
-        
+
+        # Decay trajectory attention over the recursion axis; installed after
+        # weight tying via LlamaForCausalLM.install_loop_attn (None = carry-last).
+        self.loop_attn = None
+        self.loop_attn_start = None   # layer idx where the first recursion begins
+        self.loop_attn_ends = None    # set of layer idxs that end a recursion
+
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -145,9 +151,14 @@ class LlamaModel(LlamaPreTrainedModel):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
 
-        for decoder_layer in self.layers[: self.config.num_hidden_layers]:
+        loop_attn_state = None
+        for layer_idx, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
+
+            # anchor the trajectory EMA on the state entering the first recursion
+            if self.loop_attn is not None and layer_idx == self.loop_attn_start:
+                loop_attn_state = self.loop_attn.init_state(hidden_states)
 
             if self.gradient_checkpointing and self.training:
                 layer_outputs = self._gradient_checkpointing_func(
@@ -175,6 +186,10 @@ class LlamaModel(LlamaPreTrainedModel):
                 )
 
             hidden_states = layer_outputs[0]
+
+            # at each recursion boundary, the EMA read replaces the carry-last state
+            if self.loop_attn is not None and layer_idx in self.loop_attn_ends:
+                hidden_states, loop_attn_state = self.loop_attn([hidden_states], loop_attn_state)
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
@@ -331,6 +346,34 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         # Initialize weights and apply final processing
         self.post_init()
     
+    def install_loop_attn(self, cfg):
+        """Attach DecayTrajAttn to the recursion axis. Call AFTER weight tying
+        (sharing_strategy) so the tying pass never sees these extra params."""
+        from model.loop_attn import DecayTrajAttn
+
+        sharing = cfg.recursive.sharing
+        num_recursion = cfg.recursive.num_recursion
+        n_layers = self.config.num_hidden_layers
+        if sharing == "cycle":
+            prelude, base_depth = 0, n_layers // num_recursion
+        elif sharing == "middle_cycle":
+            prelude, base_depth = 1, (n_layers - 2) // num_recursion
+        else:
+            raise ValueError(f"loop_attn supports cycle/middle_cycle sharing, got {sharing}")
+
+        la = cfg.loop_attn
+        self.model.loop_attn = DecayTrajAttn(
+            self.config.hidden_size,
+            heads=la.get("heads", 1),
+            beta_init=la.get("beta_init", 0.1),
+            temp=la.get("temp", 1.0),
+            content=la.get("content", True),
+            beta_spread=la.get("beta_spread", True),
+        ).to(self.dtype)
+        self.model.loop_attn_start = prelude
+        self.model.loop_attn_ends = {prelude + (r + 1) * base_depth - 1 for r in range(num_recursion)}
+        return self
+
     def set_kv_sharing_config(self, cfg):
         if cfg.kv_sharing.sharing in ["cycle", "sequence"]:
             base_depth = self.config.num_hidden_layers // cfg.kv_sharing.num_recursion

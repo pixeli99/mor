@@ -27,6 +27,28 @@ from util.callback import FixedStoppingCallback, EvalCallback, PeftSaveCallback,
 from util.misc import print_trainable_parameters, get_latest_checkpoint_path, print_rank_zero, get_launcher_type; print_rank_zero()
 
 
+class LoopAttnTrainer(Trainer):
+    """Stock Trainer plus: (1) no weight decay on the loop-attn beta logits
+    (decay would drag beta toward 0.5); (2) loop-attn diagnostics in the logs —
+    beta per head, newest_frac (1.0 = the read IS carry-last, i.e. a no-op),
+    read_delta and logit_std."""
+
+    def get_decay_parameter_names(self, model):
+        return [n for n in super().get_decay_parameter_names(model) if "beta_logit" not in n]
+
+    def log(self, logs, start_time=None):
+        m = self.model
+        while hasattr(m, "module"):
+            m = m.module
+        la = getattr(getattr(m, "model", m), "loop_attn", None)
+        if la is not None:
+            for i, b in enumerate(la.beta_logit.sigmoid().detach().float().cpu().tolist()):
+                logs[f"loop_attn_beta{i}"] = round(b, 4)
+            for k, v in la.stats.items():
+                logs[f"loop_attn_{k}"] = round(float(v), 4)
+        super().log(logs, start_time)
+
+
 @hydra.main(config_path="conf/pretrain", config_name="yymmdd_pretrain")
 def main(cfg: DictConfig):
     cfg = preprocess_config(cfg)
@@ -68,10 +90,15 @@ def main(cfg: DictConfig):
     print ("Loading models...")
     model = load_model_from_config(cfg)
     
-    if cfg.recursive.get("enable"):        
+    if cfg.recursive.get("enable"):
         # KV cache sharing strategy
         model, lora_init_dict = SHARING_STRATEGY[cfg.model](cfg, model)
-    
+        if "loop_attn" in cfg and cfg.loop_attn.get("enable"):
+            model.install_loop_attn(cfg)
+            model.model.loop_attn.collect = True   # cheap diagnostics, logged by LoopAttnTrainer
+            print(f"loop_attn installed: start={model.model.loop_attn_start} "
+                  f"ends={sorted(model.model.loop_attn_ends)} heads={model.model.loop_attn.heads}")
+
     if "kv_sharing" in cfg and cfg.kv_sharing.get("enable"):
         model.set_kv_sharing_config(cfg)
         
@@ -144,6 +171,8 @@ def main(cfg: DictConfig):
         
     if "mor" in cfg and cfg.mor.get("enable"):
         trainer = MoRTrainer(model=model, args=train_args, train_dataset=train_dataset, callbacks=callbacks, cfg=cfg,)
+    elif "loop_attn" in cfg and cfg.loop_attn.get("enable"):
+        trainer = LoopAttnTrainer(model=model, args=train_args, train_dataset=train_dataset, callbacks=callbacks,)
     else:
         trainer = Trainer(model=model, args=train_args, train_dataset=train_dataset, callbacks=callbacks,)
     
