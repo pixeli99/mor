@@ -33,21 +33,9 @@ from util.tokenizer import load_tokenizer_from_config
 from util.config import preprocess_config
 from util.misc import get_torch_dtype, get_latest_checkpoint_path
 
-# LM_DATASETS definition (same as in the original code)
-LM_DATASETS = {
-    "slimpajama": {"path": f"{DATA_DIR}/slimpajama", "split": "train"},
-    "slimpajama_chunk1": {"path": "json", "data_files": f"{DATA_DIR}/slimpajama_chunk1/*.jsonl", "split": "train"},
-    "slimpajama_test": {"path": "json", "data_files": f"{DATA_DIR}/slimpajama_test/*.jsonl", "split": "train"},
-    "pg19": {"path": f"emozilla/pg19-test", "split": "test", "trust_remote_code": "True"},
-    "cosmopedia": {"path": f"{DATA_DIR}/cosmopedia-v2", "split": "train"},
-    "fineweb_edu": {"path": f"{DATA_DIR}/fineweb-edu-dedup", "split": "train"},
-    "fineweb_test": {"path": f"{DATA_DIR}/fineweb-test", "split": "train"},
-    "python_edu": {"path": f"{DATA_DIR}/python-edu", "split": "train"},
-    "open_web_math": {"path": f"{DATA_DIR}/open-web-math", "split": "train"},
-    "math_code_pile": {"path": f"{DATA_DIR}/math-code-pile", "split": "train"},
-    "starcoderdata": {"path": f"{DATA_DIR}/starcoderdata", "split": "train"},  # "data_dir": "python",
-    "finemath": {"path": f"{DATA_DIR}/finemath", "split": "train"},  # "name": "finemath-4plus",
-}
+# Single source of truth for dataset paths (fineweb entries point at the local
+# parquet shards; shard 013 is the held-out fineweb_test split).
+from lm_dataset.load_dataset import LM_DATASETS
 
 
 def load_dataset_from_config(cfg, tokenizer):
@@ -125,6 +113,8 @@ def evaluate_model(exp_name: str, global_sample_number: int) -> Optional[float]:
         # Assuming cfg.model is a DictConfig, access name with .name or adjust as needed
         model_strategy_key = cfg.model.name if hasattr(cfg.model, "name") else cfg.model
         model, lora_init_dict = SHARING_STRATEGY[model_strategy_key](cfg, model)
+        if "loop_attn" in cfg and cfg.loop_attn.get("enable"):
+            model.install_loop_attn(cfg)
 
     if "kv_sharing" in cfg and cfg.kv_sharing.get("enable"):
         model.set_kv_sharing_config(cfg)
