@@ -158,7 +158,13 @@ def main(cfg: DictConfig):
     
     if cfg.relaxation.get("enable"):
         trainer.model.base_model.model.save_pretrained(train_args.output_dir, safe_serialization=False)
-    
-    
+
+    # Explicit teardown: without this, the atexit NCCL destructor segfaults on
+    # PPU workers (rank exits -11 after training fully completed and saved).
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
+        dist.destroy_process_group()
+
+
 if __name__ == "__main__":
     main()
