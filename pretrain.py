@@ -28,13 +28,41 @@ from util.misc import print_trainable_parameters, get_latest_checkpoint_path, pr
 
 
 class LoopAttnTrainer(Trainer):
-    """Stock Trainer plus: (1) no weight decay on the loop-attn beta logits
-    (decay would drag beta toward 0.5); (2) loop-attn diagnostics in the logs —
-    beta per head, newest_frac (1.0 = the read IS carry-last, i.e. a no-op),
-    read_delta and logit_std."""
+    """Stock Trainer plus: (1) loop-attn params train in their own group at
+    lr * loop_attn.lr_scale with no weight decay — at the backbone lr (3e-3)
+    the content query w destabilizes: run dlcbveb62a797f13 exploded at step
+    ~1250 (grad_norm 1024) after 1250 healthy steps; (2) loop-attn diagnostics
+    in the logs — beta per head, newest_frac (1.0 = the read IS carry-last,
+    i.e. a no-op), read_delta and logit_std."""
+
+    def __init__(self, *args, cfg=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.loop_attn_lr_scale = cfg.loop_attn.get("lr_scale", 0.1) if cfg is not None else 0.1
 
     def get_decay_parameter_names(self, model):
         return [n for n in super().get_decay_parameter_names(model) if "beta_logit" not in n]
+
+    def create_optimizer(self):
+        if self.optimizer is None:
+            opt_model = self.model
+            decay_parameters = self.get_decay_parameter_names(opt_model)
+            la_names = {n for n, _ in opt_model.named_parameters() if "loop_attn" in n}
+            groups = [
+                {"params": [p for n, p in opt_model.named_parameters()
+                            if n in decay_parameters and n not in la_names and p.requires_grad],
+                 "weight_decay": self.args.weight_decay},
+                {"params": [p for n, p in opt_model.named_parameters()
+                            if n not in decay_parameters and n not in la_names and p.requires_grad],
+                 "weight_decay": 0.0},
+                {"params": [p for n, p in opt_model.named_parameters()
+                            if n in la_names and p.requires_grad],
+                 "weight_decay": 0.0,
+                 "lr": self.args.learning_rate * self.loop_attn_lr_scale},
+            ]
+            optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args, opt_model)
+            self.optimizer = optimizer_cls(groups, **optimizer_kwargs)
+            print(f"loop_attn optimizer group: {len(groups[2]['params'])} params at lr {groups[2]['lr']:.2e}")
+        return self.optimizer
 
     def log(self, logs, start_time=None):
         m = self.model
@@ -172,7 +200,7 @@ def main(cfg: DictConfig):
     if "mor" in cfg and cfg.mor.get("enable"):
         trainer = MoRTrainer(model=model, args=train_args, train_dataset=train_dataset, callbacks=callbacks, cfg=cfg,)
     elif "loop_attn" in cfg and cfg.loop_attn.get("enable"):
-        trainer = LoopAttnTrainer(model=model, args=train_args, train_dataset=train_dataset, callbacks=callbacks,)
+        trainer = LoopAttnTrainer(model=model, args=train_args, train_dataset=train_dataset, callbacks=callbacks, cfg=cfg,)
     else:
         trainer = Trainer(model=model, args=train_args, train_dataset=train_dataset, callbacks=callbacks,)
     

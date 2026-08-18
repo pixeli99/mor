@@ -40,6 +40,7 @@ loop_attn:
   temp: 1.0
   content: true
   beta_spread: true
+  lr_scale: 0.1   # loop-attn params at lr*0.1: full 3e-3 on w exploded at step ~1250
 kv_sharing:
   enable: false
   base_depth: null
