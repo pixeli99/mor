@@ -201,4 +201,9 @@ hf_models/
 *.png
 *.pdf
 *.html
-*.csv
+*.csvwork/
+results/
+logs/
+hf_cache/
+*.log
+outputs/
