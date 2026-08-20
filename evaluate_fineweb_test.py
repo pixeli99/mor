@@ -59,9 +59,21 @@ def load_dataset_from_config(cfg, tokenizer):
         dataset_type = "lm"
         loaded_datasets = []
         for ds_name in dataset_names:
+            if ds_name == "dolma3_test":
+                # byte-weighted interleave over the held-out shards, otherwise a
+                # small sample budget reads only the first shard (single topic)
+                from lm_dataset.load_dataset import _DOLMA3_TEST_FILES
+                sizes = [os.path.getsize(f) for f in _DOLMA3_TEST_FILES]
+                parts = [load_dataset("json", data_files=[f], split="train", streaming=True).select_columns(["text"])
+                         for f in _DOLMA3_TEST_FILES]
+                _dataset = interleave_datasets(parts, probabilities=[s / sum(sizes) for s in sizes], seed=42)
+                loaded_datasets.append(_dataset)
+                continue
             _dataset = load_dataset(**LM_DATASETS[ds_name], streaming=True)
             if ds_name == "starcoderdata":
                 _dataset = _dataset.rename_column("content", "text") # Ensure renaming happens before appending
+            if ds_name.startswith("dolma3"):
+                _dataset = _dataset.select_columns(["text"])
             loaded_datasets.append(_dataset)
 
         if len(loaded_datasets) == 1:
@@ -89,9 +101,9 @@ def load_dataset_from_config(cfg, tokenizer):
         raise ValueError(f"Unknown dataset type: {dataset_type}")
 
 
-def evaluate_model(exp_name: str, global_sample_number: int) -> Optional[float]:
+def evaluate_model(exp_name: str, global_sample_number: int, eval_dataset: str = "fineweb_test") -> Optional[float]:
     """
-    Evaluates a model specified by exp_name on the fineweb_test dataset.
+    Evaluates a model specified by exp_name on a held-out dataset.
     Returns the average loss if successful, None otherwise.
     """
     print(f"Evaluating experiment: {exp_name}")
@@ -198,7 +210,7 @@ def evaluate_model(exp_name: str, global_sample_number: int) -> Optional[float]:
 
     # Load dataset
     cfg_for_dataset = deepcopy(cfg)
-    cfg_for_dataset.dataset = "fineweb_test"
+    cfg_for_dataset.dataset = eval_dataset
 
     tokenizer = load_tokenizer_from_config(cfg_for_dataset)
     dataset = load_dataset_from_config(cfg_for_dataset, tokenizer)
@@ -211,7 +223,7 @@ def evaluate_model(exp_name: str, global_sample_number: int) -> Optional[float]:
     evaluated_samples = 0
     avg_loss = None # Initialize avg_loss
 
-    print(f"Starting evaluation for {exp_name} on fineweb_test using device: {device}...")
+    print(f"Starting evaluation for {exp_name} on {eval_dataset} using device: {device}...")
     try:
         for i, sample in enumerate(dataset):
             if i >= global_sample_number:
@@ -239,7 +251,7 @@ def evaluate_model(exp_name: str, global_sample_number: int) -> Optional[float]:
 
         if evaluated_samples > 0:
             avg_loss = round(total_loss / evaluated_samples, 4)
-            print(f"Experiment: {exp_name}, fineweb_test loss ({evaluated_samples} samples): {avg_loss}")
+            print(f"Experiment: {exp_name}, {eval_dataset} loss ({evaluated_samples} samples): {avg_loss}")
         else:
             print(f"Experiment: {exp_name}, No samples were evaluated successfully.")
             avg_loss = None # Explicitly set to None if no samples evaluated
@@ -278,6 +290,12 @@ def main():
         default="evaluation_results.json",
         help="Path to save the JSON file with evaluation results."
     )
+    parser.add_argument(
+        "--eval_dataset",
+        type=str,
+        default="fineweb_test",
+        help="Held-out dataset to evaluate on (fineweb_test or dolma3_test)."
+    )
 
     args = parser.parse_args()
     experiment_names = args.exp_names
@@ -294,7 +312,7 @@ def main():
     all_results: Dict[str, Optional[float]] = {} # Initialize dictionary to store all results
 
     for exp_name in experiment_names:
-        loss = evaluate_model(exp_name, global_sample_number)
+        loss = evaluate_model(exp_name, global_sample_number, eval_dataset=args.eval_dataset)
         all_results[exp_name] = loss # loss can be float or None
         print("-" * 70)
 

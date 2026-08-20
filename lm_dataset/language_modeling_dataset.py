@@ -81,7 +81,7 @@ class LanguageModelingDataset(IterableDataset):
             self.resume = True
                 
         if self.global_shuffling:
-            dataset = self.dataset.suffle(seed=self.seed + self.epoch)
+            dataset = self.dataset.shuffle(seed=self.seed + self.epoch)
         iterator = iter(dataset)    
         
         if self.iter_step > 0:            
