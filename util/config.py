@@ -17,8 +17,11 @@ def preprocess_config(cfg: DictConfig):
     elif cfg.precision == "fp16":
         warnings.warn("Are you sure you want to use fp16? We use bf16 by default.")
         
-    # Automatically determine batch size and gradient accumulation steps
-    n_gpus = torch.cuda.device_count()
+    # Automatically determine batch size and gradient accumulation steps.
+    # Under a distributed launcher WORLD_SIZE is the GLOBAL rank count (multi-
+    # node!); device_count() only sees the local node and would double the
+    # effective batch on 2 nodes.
+    n_gpus = int(os.environ.get("WORLD_SIZE") or 0) or torch.cuda.device_count()
     n_gpus = n_gpus or 1
     if cfg.get("total_batch_size") is not None:
         print("Automatically determining batch size based on `total_batch_size`")
