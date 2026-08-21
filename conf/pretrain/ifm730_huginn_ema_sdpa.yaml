@@ -1,0 +1,117 @@
+name: ifm730_huginn_ema_sdpa
+wandb: false
+wandb_mode: offline
+wandb_entity: null
+wandb_project: null
+wandb_run_name: null
+output_dir: null
+wandb_run_id: null
+tensorboard: true
+tensorboard_dir: null
+resume_from_checkpoint: false
+resume_step: null
+dataset: dolma3_mix
+weights: null
+total_batch_size: 512   # 512 x 8192 = 4.19M tok/step, IFM recipe
+per_device_train_batch_size: 2
+gradient_accumulation_steps: null
+batch_size_rampup_steps: null
+max_length: 8192
+add_bos_token: false
+global_shuffling: false
+local_shuffling: false
+tokenizer: dsv4
+model: smollm
+model_name_or_path: /cpfs01/shared/public/users/pengxiang.li/mixture_of_recursions/hf_models/dsv4-1536-112L
+model_config: null
+attn_implementation: sdpa
+use_pretrained_weights: false
+recursive:
+  enable: true
+  base_depth: null
+  num_recursion: 8
+  prelude_depth: 8   # Huginn-style P8 R12^8 C8: 112 logical layers, 28 stored blocks
+  coda_depth: 8
+  sharing: middle_cycle
+  ln_share: true
+  initialization: random
+loop_attn:
+  enable: true
+  heads: 1
+  beta_init: 0.1
+  temp: 1.0
+  content: false   # pure learned-beta EMA: both content=true runs exploded at high backbone lr
+  beta_spread: true
+  lr_scale: 0.1
+kv_sharing:
+  enable: false
+  base_depth: null
+  num_recursion: null
+  sharing: null
+relaxation:
+  enable: false
+  skip_first_loop: false
+  method: lora
+  lora:
+    r: 16
+    alpha: 32
+    dropout: 0.1
+    target_modules:
+    - q_proj
+    - v_proj
+    rank_pattern: null
+    alpha_pattern: 2.0
+    svd_init: false
+  prompt:
+    len: 16
+mor:
+  enable: false
+  type: expert
+  capacity: null
+  rand_router: false
+  router_type: mlp
+  z_loss: false
+  z_coeff: 0.001
+  temp: 1.0
+  expert:
+    cap_warmup_step: 0
+    router_func: sigmoid
+    alpha: 0.1
+    sampling: aux_loss
+    include_first: true
+    coeff: 0.001
+    gating: weighted
+  token:
+    router_func: sigmoid
+    alpha: 0.1
+    balancing: loss
+    coeff: 0.001
+    u: 0.001
+    gating: weighted
+lr_scheduler_type: cosine_with_min_lr
+lr_scheduler_kwargs:
+  min_lr_rate: 0.1
+learning_rate: 0.0006  # placeholder: probe {4,6,8}e-4 per IFM sweep before the full run
+adam_beta1: 0.9
+adam_beta2: 0.95
+weight_decay: 0.1
+precision: bf16
+max_grad_norm: 1.0
+num_train_steps: 10000  # ~41.9B tokens at 512x8192 = 58 TPP on 0.73B stored blocks
+stop_steps: 10000
+num_warmup_steps: 200
+save_interval: 0.1
+save_steps: null
+fixed_save_steps: null
+save_total_limit: null
+logging_steps: 20
+dataloader_num_workers: 0
+gradient_checkpointing: true   # 112 executed layers at seq 8192 need it
+deepspeed: null
+evaluation:
+  enable: false
+  eval_steps: 5
+  batch_size: 16
+  tasks: lambada_openai,hellaswag,piqa
+  device: null
+  num_fewshot: null

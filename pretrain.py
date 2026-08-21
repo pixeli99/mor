@@ -172,6 +172,8 @@ def main(cfg: DictConfig):
         save_safetensors=False if launcher_type == "accelerate" else True,
         gradient_accumulation_steps=cfg.gradient_accumulation_steps,
         gradient_checkpointing=cfg.gradient_checkpointing,
+        # reentrant checkpointing breaks DDP when tied layers recur across segments
+        gradient_checkpointing_kwargs={"use_reentrant": False} if cfg.gradient_checkpointing else None,
         max_grad_norm=cfg.max_grad_norm,
         dataloader_num_workers=cfg.dataloader_num_workers,
         bf16=cfg.precision == "bf16",

@@ -207,3 +207,6 @@ logs/
 hf_cache/
 *.log
 outputs/
+work/
+plots/
+evaluation_results.json

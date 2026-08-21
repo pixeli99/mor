@@ -8,6 +8,7 @@ from paths import MODEL_DIR
 TOKENIZERS = {
     "smollm": AutoTokenizer.from_pretrained(os.path.join(MODEL_DIR, "SmolLM-135M")),
     "smollm2": AutoTokenizer.from_pretrained(os.path.join(MODEL_DIR, "SmolLM2-135M")),
+    "dsv4": AutoTokenizer.from_pretrained(os.path.join(MODEL_DIR, "DeepSeek-V4-Tokenizer")),
 }
 
 

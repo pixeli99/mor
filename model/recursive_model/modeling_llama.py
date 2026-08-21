@@ -357,7 +357,9 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         if sharing == "cycle":
             prelude, base_depth = 0, n_layers // num_recursion
         elif sharing == "middle_cycle":
-            prelude, base_depth = 1, (n_layers - 2) // num_recursion
+            prelude = int(cfg.recursive.get("prelude_depth", 1) or 1)
+            coda = int(cfg.recursive.get("coda_depth", 1) or 1)
+            base_depth = (n_layers - prelude - coda) // num_recursion
         else:
             raise ValueError(f"loop_attn supports cycle/middle_cycle sharing, got {sharing}")
 

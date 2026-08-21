@@ -8,6 +8,15 @@ import torch.nn as nn
 from util.misc import get_torch_dtype
 
 
+def _prelude_coda(cfg):
+    """Envelope depth for middle_* strategies: number of independent (untied)
+    layers at the front/back of the stack. Defaults to 1/1, the original MoR
+    middle_cycle; Huginn-style P8 R12 C8 uses 8/8."""
+    p = int(cfg.recursive.get("prelude_depth", 1) or 1)
+    c = int(cfg.recursive.get("coda_depth", 1) or 1)
+    return p, c
+
+
 @torch.no_grad()
 def average_initialize(cfg, model):
     """
@@ -19,7 +28,8 @@ def average_initialize(cfg, model):
     sharing_strategy = cfg.recursive.sharing
     init_strategy = cfg.recursive.initialization
     torch_dtype = get_torch_dtype(cfg)
-    
+    p, c = _prelude_coda(cfg)
+
     if cfg.recursive.num_recursion == 1:
         base_depth = cfg.recursive.base_depth
         num_recursion = model.config.num_hidden_layers // base_depth
@@ -28,7 +38,7 @@ def average_initialize(cfg, model):
         if sharing_strategy in ["cycle", "sequence"]:
             base_depth = int(model.config.num_hidden_layers // num_recursion)
         elif sharing_strategy in ["middle_cycle", "middle_sequence"]:
-            base_depth = int((model.config.num_hidden_layers - 2) // num_recursion)
+            base_depth = int((model.config.num_hidden_layers - p - c) // num_recursion)
     
     new_state_dict = {}
     cur_state_dict = model.state_dict()
@@ -36,7 +46,7 @@ def average_initialize(cfg, model):
     
     if sharing_strategy in ["middle_cycle", "middle_sequence"]:
         # First and last layer initialization
-        for idx in [0, model.config.num_hidden_layers - 1]:
+        for idx in list(range(p)) + list(range(model.config.num_hidden_layers - c, model.config.num_hidden_layers)):
             # Self Attention
             keys = ["q_proj", "k_proj", "v_proj", "o_proj"]
             for key in keys:
@@ -59,9 +69,9 @@ def average_initialize(cfg, model):
         elif sharing_strategy == "sequence":
             src_idxs = tar_idxs = range(i * num_recursion, (i + 1) * num_recursion)
         elif sharing_strategy == "middle_cycle":
-            src_idxs = tar_idxs = [1 + i + rec * base_depth for rec in range(num_recursion)]  # plus 1 because the first layer is not shared
+            src_idxs = tar_idxs = [p + i + rec * base_depth for rec in range(num_recursion)]  # offset by prelude depth: prelude layers are not shared
         elif sharing_strategy == "middle_sequence":
-            src_idxs = tar_idxs = range(1 + i * num_recursion, 1 + (i + 1) * num_recursion)  # plus 1 because the first layer is not shared
+            src_idxs = tar_idxs = range(p + i * num_recursion, p + (i + 1) * num_recursion)  # offset by prelude depth: prelude layers are not shared
         else:
             raise ValueError(f"Invalid sharing strategy: {sharing_strategy}")
 
@@ -111,7 +121,8 @@ def selection_initialize(cfg, model):
     sharing_strategy = cfg.recursive.sharing
     init_strategy = cfg.recursive.initialization
     torch_dtype = get_torch_dtype(cfg)
-    
+    p, c = _prelude_coda(cfg)
+
     if cfg.recursive.num_recursion == 1:
         base_depth = cfg.recursive.base_depth
         num_recursion = model.config.num_hidden_layers // base_depth
@@ -120,7 +131,7 @@ def selection_initialize(cfg, model):
         if sharing_strategy in ["cycle", "sequence"]:
             base_depth = int(model.config.num_hidden_layers // num_recursion)
         elif sharing_strategy in ["middle_cycle", "middle_sequence"]:
-            base_depth = int((model.config.num_hidden_layers - 2) // num_recursion)
+            base_depth = int((model.config.num_hidden_layers - p - c) // num_recursion)
 
     new_state_dict = {}
     cur_state_dict = model.state_dict()
@@ -128,7 +139,7 @@ def selection_initialize(cfg, model):
     
     if sharing_strategy in ["middle_cycle", "middle_sequence"]:
         # First and last layer initialization
-        for idx in [0, model.config.num_hidden_layers - 1]:
+        for idx in list(range(p)) + list(range(model.config.num_hidden_layers - c, model.config.num_hidden_layers)):
             # Self Attention
             keys = ["q_proj", "k_proj", "v_proj", "o_proj"]
             for key in keys:
@@ -149,25 +160,25 @@ def selection_initialize(cfg, model):
         if sharing_strategy in ["cycle", "sequence"]:
             src_idxs = [round(i) for i in np.linspace(0, model.config.num_hidden_layers - 1, base_depth)]
         elif sharing_strategy in ["middle_cycle", "middle_sequence"]:
-            src_idxs = [round(i) for i in np.linspace(1, model.config.num_hidden_layers - 2, base_depth)]      
-              
+            src_idxs = [round(i) for i in np.linspace(p, model.config.num_hidden_layers - c - 1, base_depth)]
+
     elif init_strategy == "lower":
         if sharing_strategy in ["cycle", "sequence"]:
             src_idxs = range(base_depth)
         elif sharing_strategy in ["middle_cycle", "middle_sequence"]:
-            src_idxs = range(1, base_depth + 1)
-           
+            src_idxs = range(p, base_depth + p)
+
     elif init_strategy == "upper":
         if sharing_strategy in ["cycle", "sequence"]:
             src_idxs = range(model.config.num_hidden_layers - base_depth, model.config.num_hidden_layers)
         elif sharing_strategy in ["middle_cycle", "middle_sequence"]:
-            src_idxs = range(model.config.num_hidden_layers - base_depth - 1, model.config.num_hidden_layers - 1)
-                    
+            src_idxs = range(model.config.num_hidden_layers - c - base_depth, model.config.num_hidden_layers - c)
+
     elif init_strategy == "random":
         if sharing_strategy in ["cycle", "sequence"]:
             src_idxs = sorted(np.random.choice(model.config.num_hidden_layers, base_depth, replace=False))
         elif sharing_strategy in ["middle_cycle", "middle_sequence"]:
-            src_idxs = sorted(np.random.choice(range(1, model.config.num_hidden_layers - 1), base_depth, replace=False))   
+            src_idxs = sorted(np.random.choice(range(p, model.config.num_hidden_layers - c), base_depth, replace=False))
                  
     else:
         raise ValueError(f"Invalid initialization strategy: {init_strategy}")
@@ -179,9 +190,9 @@ def selection_initialize(cfg, model):
         elif sharing_strategy == "sequence":
             tar_idxs = range(i * num_recursion, (i + 1) * num_recursion)
         elif sharing_strategy == "middle_cycle":
-            tar_idxs = [1 + i + rec * base_depth for rec in range(num_recursion)]
+            tar_idxs = [p + i + rec * base_depth for rec in range(num_recursion)]
         elif sharing_strategy == "middle_sequence":
-            tar_idxs = range(1 + i * num_recursion, 1 + (i + 1) * num_recursion)
+            tar_idxs = range(p + i * num_recursion, p + (i + 1) * num_recursion)
         else:
             raise ValueError(f"Invalid sharing strategy: {sharing_strategy}")
 
@@ -237,7 +248,8 @@ def sharing_strategy(cfg, model):
     """
     sharing_strategy = cfg.recursive.sharing
     init_strategy = cfg.recursive.initialization
-    
+    p, c = _prelude_coda(cfg)
+
     if cfg.recursive.num_recursion == 1:
         base_depth = cfg.recursive.base_depth
         num_recursion = model.config.num_hidden_layers // base_depth
@@ -252,12 +264,12 @@ def sharing_strategy(cfg, model):
                 model.config.num_hidden_layers = base_depth * num_recursion
                 
         elif sharing_strategy in ["middle_cycle", "middle_sequence"]:
-            base_depth = int((model.config.num_hidden_layers - 2) // num_recursion)
-            if base_depth * num_recursion != model.config.num_hidden_layers - 2:
+            base_depth = int((model.config.num_hidden_layers - p - c) // num_recursion)
+            if base_depth * num_recursion != model.config.num_hidden_layers - p - c:
                 warnings.warn("Total number of layers should be divisible by num_recursion. Adjusting the number of layers.")
-                indices = [round(i) for i in np.linspace(1, model.config.num_hidden_layers - 2, base_depth * num_recursion)]
-                model.model.layers = nn.ModuleList([model.model.layers[0]] + [model.model.layers[idx] for idx in indices] + [model.model.layers[-1]])
-                model.config.num_hidden_layers = base_depth * num_recursion + 2
+                indices = [round(i) for i in np.linspace(p, model.config.num_hidden_layers - c - 1, base_depth * num_recursion)]
+                model.model.layers = nn.ModuleList(list(model.model.layers[:p]) + [model.model.layers[idx] for idx in indices] + list(model.model.layers[len(model.model.layers) - c:]))
+                model.config.num_hidden_layers = base_depth * num_recursion + p + c
                 
         else:
             raise ValueError(f"Invalid sharing strategy: {sharing_strategy}")
@@ -279,9 +291,9 @@ def sharing_strategy(cfg, model):
             elif sharing_strategy == "sequence":
                 idxs = range(layer_idx * num_recursion, (layer_idx + 1) * num_recursion)
             elif sharing_strategy == "middle_cycle":
-                idxs = [1 + layer_idx + rec * base_depth for rec in range(num_recursion)]  # plus 1 because the first layer is not shared
+                idxs = [p + layer_idx + rec * base_depth for rec in range(num_recursion)]  # offset by prelude depth: prelude layers are not shared
             elif sharing_strategy == "middle_sequence":
-                idxs = range(1 + layer_idx * num_recursion, 1 + (layer_idx + 1) * num_recursion)  # plus 1 because the first layer is not shared
+                idxs = range(p + layer_idx * num_recursion, p + (layer_idx + 1) * num_recursion)  # offset by prelude depth: prelude layers are not shared
             else:
                 raise ValueError(f"Invalid sharing strategy: {sharing_strategy}")
 
