@@ -91,7 +91,7 @@ mor:
 lr_scheduler_type: cosine_with_min_lr
 lr_scheduler_kwargs:
   min_lr_rate: 0.1
-learning_rate: 0.0006  # placeholder: probe {4,6,8}e-4 per IFM sweep before the full run
+learning_rate: 0.0008  # probe winner: 4e-4=4.68, 6e-4=4.40, 8e-4=4.28 at step 600, monotone and stable
 adam_beta1: 0.9
 adam_beta2: 0.95
 weight_decay: 0.1
@@ -100,10 +100,10 @@ max_grad_norm: 1.0
 num_train_steps: 10000  # ~41.9B tokens at 512x8192 = 58 TPP on 0.73B stored blocks
 stop_steps: 10000
 num_warmup_steps: 200
-save_interval: 0.1
+save_interval: 0.02   # ckpt every 200 steps: preemption on shared quota costs <4h
 save_steps: null
 fixed_save_steps: null
-save_total_limit: null
+save_total_limit: 3
 logging_steps: 20
 dataloader_num_workers: 0
 gradient_checkpointing: true   # 112 executed layers at seq 8192 need it
