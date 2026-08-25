@@ -376,6 +376,28 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         self.model.loop_attn_ends = {prelude + (r + 1) * base_depth - 1 for r in range(num_recursion)}
         return self
 
+    def install_residual_scale(self, cfg):
+        """Scale attn/MLP residual branches of the looped blocks by eps = lambda/(N*sqrt(L/12))
+        (arXiv 2606.18524). Envelope (prelude/coda) layers stay at 1.0. Touches no params,
+        so checkpoints are unaffected; must be re-installed at load (pretrain + eval do)."""
+        eps = float(cfg.recursive.get("residual_scale") or 0)
+        if not eps:
+            return self
+        sharing = cfg.recursive.sharing
+        num_recursion = cfg.recursive.num_recursion
+        n_layers = self.config.num_hidden_layers
+        if sharing == "cycle":
+            prelude, base_depth = 0, n_layers // num_recursion
+        elif sharing == "middle_cycle":
+            prelude = int(cfg.recursive.get("prelude_depth", 1) or 1)
+            coda = int(cfg.recursive.get("coda_depth", 1) or 1)
+            base_depth = (n_layers - prelude - coda) // num_recursion
+        else:
+            raise ValueError(f"residual_scale supports cycle/middle_cycle sharing, got {sharing}")
+        for layer in self.model.layers[prelude : prelude + num_recursion * base_depth]:
+            layer.residual_scale = eps
+        return self
+
     def set_kv_sharing_config(self, cfg):
         if cfg.kv_sharing.sharing in ["cycle", "sequence"]:
             base_depth = self.config.num_hidden_layers // cfg.kv_sharing.num_recursion

@@ -125,6 +125,8 @@ def evaluate_model(exp_name: str, global_sample_number: int, eval_dataset: str =
         # Assuming cfg.model is a DictConfig, access name with .name or adjust as needed
         model_strategy_key = cfg.model.name if hasattr(cfg.model, "name") else cfg.model
         model, lora_init_dict = SHARING_STRATEGY[model_strategy_key](cfg, model)
+        if cfg.recursive.get("residual_scale"):
+            model.install_residual_scale(cfg)
         if "loop_attn" in cfg and cfg.loop_attn.get("enable"):
             model.install_loop_attn(cfg)
 

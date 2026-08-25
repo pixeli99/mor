@@ -121,6 +121,9 @@ def main(cfg: DictConfig):
     if cfg.recursive.get("enable"):
         # KV cache sharing strategy
         model, lora_init_dict = SHARING_STRATEGY[cfg.model](cfg, model)
+        if cfg.recursive.get("residual_scale"):
+            model.install_residual_scale(cfg)
+            print(f"residual_scale {cfg.recursive.residual_scale} on looped blocks")
         if "loop_attn" in cfg and cfg.loop_attn.get("enable"):
             model.install_loop_attn(cfg)
             model.model.loop_attn.collect = True   # cheap diagnostics, logged by LoopAttnTrainer
