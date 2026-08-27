@@ -129,6 +129,10 @@ def main(cfg: DictConfig):
             model.model.loop_attn.collect = True   # cheap diagnostics, logged by LoopAttnTrainer
             print(f"loop_attn installed: start={model.model.loop_attn_start} "
                   f"ends={sorted(model.model.loop_attn_ends)} heads={model.model.loop_attn.heads}")
+        if "nvfp4_state" in cfg and cfg.nvfp4_state.get("enable"):
+            model.install_nvfp4_state(cfg)
+            print(f"nvfp4_state installed: scale={model.model.nvfp4_state.scale_rule} "
+                  f"ends={sorted(model.model.nvfp4_ends)}")
 
     if "kv_sharing" in cfg and cfg.kv_sharing.get("enable"):
         model.set_kv_sharing_config(cfg)

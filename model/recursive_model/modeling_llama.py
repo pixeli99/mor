@@ -79,6 +79,12 @@ class LlamaModel(LlamaPreTrainedModel):
         self.loop_attn_start = None   # layer idx where the first recursion begins
         self.loop_attn_ends = None    # set of layer idxs that end a recursion
 
+        # NVFP4 fake-quant of the recursion-carried state; installed via
+        # LlamaForCausalLM.install_nvfp4_state (None = bf16 carry, no-op).
+        self.nvfp4_state = None
+        self.nvfp4_start = None
+        self.nvfp4_ends = None
+
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -160,6 +166,9 @@ class LlamaModel(LlamaPreTrainedModel):
             if self.loop_attn is not None and layer_idx == self.loop_attn_start:
                 loop_attn_state = self.loop_attn.init_state(hidden_states)
 
+            if self.nvfp4_state is not None and layer_idx == self.nvfp4_start:
+                self.nvfp4_state.reset()  # carry scale re-anchors per forward
+
             if self.gradient_checkpointing and self.training:
                 layer_outputs = self._gradient_checkpointing_func(
                     decoder_layer.__call__,
@@ -190,6 +199,10 @@ class LlamaModel(LlamaPreTrainedModel):
             # at each recursion boundary, the EMA read replaces the carry-last state
             if self.loop_attn is not None and layer_idx in self.loop_attn_ends:
                 hidden_states, loop_attn_state = self.loop_attn([hidden_states], loop_attn_state)
+
+            # what actually crosses the recursion boundary is the NVFP4 decode
+            if self.nvfp4_state is not None and layer_idx in self.nvfp4_ends:
+                hidden_states = self.nvfp4_state(hidden_states)
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
@@ -374,6 +387,28 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         ).to(self.dtype)
         self.model.loop_attn_start = prelude
         self.model.loop_attn_ends = {prelude + (r + 1) * base_depth - 1 for r in range(num_recursion)}
+        return self
+
+    def install_nvfp4_state(self, cfg):
+        """Fake-quant the recursion-carried hidden state as packed NVFP4 at every
+        recursion boundary. Parameter-free; checkpoints unaffected; must be
+        re-installed at load (pretrain + eval both do)."""
+        from model.nvfp4_state import NVFP4State
+
+        sharing = cfg.recursive.sharing
+        num_recursion = cfg.recursive.num_recursion
+        n_layers = self.config.num_hidden_layers
+        if sharing == "cycle":
+            prelude, base_depth = 0, n_layers // num_recursion
+        elif sharing == "middle_cycle":
+            prelude = int(cfg.recursive.get("prelude_depth", 1) or 1)
+            coda = int(cfg.recursive.get("coda_depth", 1) or 1)
+            base_depth = (n_layers - prelude - coda) // num_recursion
+        else:
+            raise ValueError(f"nvfp4_state supports cycle/middle_cycle sharing, got {sharing}")
+        self.model.nvfp4_state = NVFP4State(scale_rule=cfg.nvfp4_state.get("scale", "amax"))
+        self.model.nvfp4_start = prelude
+        self.model.nvfp4_ends = {prelude + (r + 1) * base_depth - 1 for r in range(num_recursion)}
         return self
 
     def install_residual_scale(self, cfg):

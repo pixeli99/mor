@@ -129,6 +129,10 @@ def evaluate_model(exp_name: str, global_sample_number: int, eval_dataset: str =
             model.install_residual_scale(cfg)
         if "loop_attn" in cfg and cfg.loop_attn.get("enable"):
             model.install_loop_attn(cfg)
+        if "nvfp4_state" in cfg and cfg.nvfp4_state.get("enable"):
+            model.install_nvfp4_state(cfg)
+            print(f"nvfp4_state installed: scale={model.model.nvfp4_state.scale_rule} "
+                  f"ends={sorted(model.model.nvfp4_ends)}")
 
     if "kv_sharing" in cfg and cfg.kv_sharing.get("enable"):
         model.set_kv_sharing_config(cfg)
