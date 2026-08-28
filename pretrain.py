@@ -163,6 +163,9 @@ def main(cfg: DictConfig):
         report_to.append("tensorboard")
     
     train_args = TrainingArguments(
+        # resume fast-forwards ~1B raw tokens/rank through the tokenizer before the
+        # first collective; the 1800s default kills it (3x 2-node resumes, 8/8 attempts)
+        ddp_timeout=int(cfg.get("ddp_timeout", 1800)),
         lr_scheduler_type=cfg.get("lr_scheduler_type", "cosine_with_min_lr"),
         lr_scheduler_kwargs=dict(cfg.get("lr_scheduler_kwargs", {"min_lr_rate": 0.1,})),
         learning_rate=cfg.learning_rate,

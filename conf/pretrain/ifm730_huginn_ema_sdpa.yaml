@@ -106,6 +106,7 @@ fixed_save_steps: null
 save_total_limit: 3
 logging_steps: 20
 dataloader_num_workers: 0
+ddp_timeout: 21600   # resume fast-forward can exceed the 1800s DDP default
 gradient_checkpointing: true   # 112 executed layers at seq 8192 need it
 deepspeed: null
 evaluation:
