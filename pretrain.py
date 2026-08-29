@@ -23,7 +23,7 @@ from model.relaxation.util import relax_weight_sharing
 from util.config import preprocess_config
 from util.tokenizer import load_tokenizer_from_config 
 from util.trainer_pt import MoRTrainer
-from util.callback import FixedStoppingCallback, EvalCallback, PeftSaveCallback, DatasetSaveCallback, ScalingLawsSaveCallback
+from util.callback import FixedStoppingCallback, EvalCallback, PeftSaveCallback, DatasetSaveCallback, ScalingLawsSaveCallback, ValLossCallback
 from util.misc import print_trainable_parameters, get_latest_checkpoint_path, print_rank_zero, get_launcher_type; print_rank_zero()
 
 
@@ -154,6 +154,19 @@ def main(cfg: DictConfig):
         else:
             raise ValueError(f"Unknown MoR type {cfg.mor.type}.")
         
+    if cfg.get("init_weights_from"):
+        # warm start from a finished run: weights only (fresh optimizer / scheduler /
+        # data stream). A resume_from_checkpoint of THIS run still wins: Trainer
+        # reloads the checkpoint weights after this point.
+        init_path = cfg.init_weights_from
+        if not os.path.isabs(init_path):
+            init_path = os.path.join(PROJECT_ROOT, init_path)
+        init_sd = torch.load(init_path, map_location="cpu")
+        model.load_state_dict(init_sd, strict=True)
+        print(f"init_weights_from {init_path}: {len(init_sd)} tensors, strict load ok"
+              + (" (resume_from_checkpoint will override)" if cfg.resume_from_checkpoint else ""))
+        del init_sd
+
     print_trainable_parameters(model)
         
     report_to = []
@@ -202,6 +215,8 @@ def main(cfg: DictConfig):
         callbacks.append(FixedStoppingCallback(cfg.stop_steps))
     if "evaluation" in cfg and cfg.evaluation.enable:
         callbacks.append(EvalCallback(cfg, tokenizer))
+    if "val_loss" in cfg and cfg.val_loss.get("enable"):
+        callbacks.append(ValLossCallback(cfg, tokenizer))
     if cfg.relaxation.get("enable") and cfg.relaxation.method in ["lora", "dora", "adaption_prompt"]:
         callbacks.append(PeftSaveCallback(cfg.save_steps, fixed_save_steps=fixed_save_steps))
     if all(ds in LM_DATASETS for ds in cfg.dataset.split(',')):

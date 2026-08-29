@@ -26,6 +26,82 @@ except ImportError as _lm_eval_err:
 from transformers.trainer_callback import CallbackHandler
 
 
+class ValLossCallback(TrainerCallback):
+    """Held-out LM loss during training: mean per-sequence CE over the first
+    `samples` packed sequences of `dataset` (same recipe and numbers as
+    evaluate_fineweb_test.py), on rank 0 at step 0 and every `eval_steps`.
+    Config block (nothing happens unless it is present and enabled):
+        val_loss: {enable: true, eval_steps: 100, samples: 500, dataset: fineweb_test}
+    Runs the unwrapped model under no_grad (fake-quant modules included), the
+    other ranks wait at their next all-reduce (500 x 2048 tokens ~ 1 min on
+    one PPU). Prints `=== val_loss step=N ...` and writes tensorboard val/loss."""
+    def __init__(self, cfg, tokenizer) -> None:
+        super().__init__()
+        v = cfg.val_loss
+        self.cfg = cfg
+        self.tokenizer = tokenizer
+        self.eval_steps = int(v.get("eval_steps", 100))
+        self.samples = int(v.get("samples", 500))
+        self.dataset = str(v.get("dataset", "fineweb_test"))
+        self.at_begin = bool(v.get("at_begin", True))
+        self._batch = None
+        self.writer = SummaryWriter(cfg.tensorboard_dir) if cfg.get("tensorboard") else None
+
+    @staticmethod
+    def _is_rank0():
+        return int(os.environ.get("RANK") or 0) == 0
+
+    def _load(self):
+        # identical construction to evaluate_fineweb_test.load_dataset_from_config for one LM dataset
+        from datasets import load_dataset
+        from lm_dataset.load_dataset import LM_DATASETS
+        from lm_dataset.language_modeling_dataset import LanguageModelingDataset
+        from lm_dataset.data_preprocessing import AddLabels, RemoveIndex
+        ds = LanguageModelingDataset(load_dataset(**LM_DATASETS[self.dataset], streaming=True), self.tokenizer,
+                                     max_length=self.cfg.max_length, transforms=[AddLabels(), RemoveIndex()],
+                                     global_shuffling=False, local_shuffling=False,
+                                     add_bos_token=self.cfg.get("add_bos_token", False))
+        out = []
+        for i, sample in enumerate(ds):
+            if i >= self.samples:
+                break
+            out.append({k: sample[k].clone() for k in ("input_ids", "attention_mask", "labels")})
+        self._batch = out
+
+    @torch.no_grad()
+    def _run(self, model, step):
+        if not self._is_rank0() or model is None:
+            return
+        import time
+        if self._batch is None:
+            self._load()
+        was_training = model.training
+        model.eval()
+        device = next(model.parameters()).device
+        t0, total = time.time(), 0.0
+        for s in self._batch:
+            out = model(input_ids=s["input_ids"].unsqueeze(0).to(device),
+                        attention_mask=s["attention_mask"].unsqueeze(0).to(device),
+                        labels=s["labels"].unsqueeze(0).to(device),
+                        use_cache=False, return_dict=True)
+            total += out.loss.item()
+        if was_training:
+            model.train()
+        avg = total / max(1, len(self._batch))
+        print(f"=== val_loss step={step} {self.dataset} n={len(self._batch)} loss={avg:.4f} ({time.time() - t0:.0f}s)")
+        if self.writer is not None:
+            self.writer.add_scalar("val/loss", avg, step)
+            self.writer.flush()
+
+    def on_train_begin(self, args, state, control, model=None, **kwargs):
+        if self.at_begin and state.global_step == 0:
+            self._run(model, 0)
+
+    def on_step_end(self, args, state, control, model=None, **kwargs):
+        if self.eval_steps > 0 and state.global_step % self.eval_steps == 0:
+            self._run(model, state.global_step)
+
+
 class FixedStoppingCallback(TrainerCallback):
     """
     This callback is used when you want to set a certain num_train_steps for the learning rate scheduler 
