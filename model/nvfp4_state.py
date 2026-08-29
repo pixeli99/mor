@@ -23,6 +23,25 @@ are measured here because looped residuals grow across recursions):
           at eval/train the same install path loads it. Tokens whose block
           amax exceeds 6*s are clipped (E2M1 saturates at +-6).
 
+  entry_frozen — per-token block scale fitted ONCE from amax at the rollout
+          entry and held for every later boundary of the same forward ("fast
+          code, slow scale" in its LM form). Entry = the first boundary (k=0,
+          default `entry_at: boundary0`) or the state entering the first looped
+          block (`entry_at: loop_input`, fed through reset(h)). Later boundaries
+          whose amax outgrew the frozen scale are clipped at +-6*s: on the
+          present rec3 (block amax x2 per recursion) this is expected to hurt,
+          which is the point of measuring it.
+
+Optional second-level scale (`tensor_scale: true`, any rule but fixed): the
+NVFP4 per-tensor FP32 scale s_t = amax_tensor / (6*448), re-fit at every
+boundary from the whole carried tensor (frozen with the block scale under
+entry_frozen). Block scales become UE4M3(amax_block / (6*s_t)) <= 448 by
+construction, so the 448 saturation seen at boundary 1 (block amax up to 5600
+> 6*448 = 2688) disappears; decode is E2M1 * UE4M3 * s_t.
+
+Both are off by default; the amax / carry / fixed paths are bit-identical to
+the pre-variant implementation when they are off (tests/test_nvfp4_state.py).
+
 No parameters, no registered buffers: checkpoints are unaffected; must be
 re-installed at load (pretrain + eval both do, same as residual_scale).
 """
@@ -64,12 +83,18 @@ def percentile_key(p):
 
 
 class NVFP4State(nn.Module):
-    def __init__(self, scale_rule="amax", fixed_idx=None, calibrate=False):
+    def __init__(self, scale_rule="amax", fixed_idx=None, calibrate=False,
+                 tensor_scale=False, entry_at="boundary0"):
         super().__init__()
-        assert scale_rule in ("amax", "carry", "fixed")
+        assert scale_rule in ("amax", "carry", "fixed", "entry_frozen")
+        assert entry_at in ("boundary0", "loop_input"), entry_at
+        assert not (tensor_scale and scale_rule == "fixed"), "fixed tables were calibrated without a tensor scale"
         self.scale_rule = scale_rule
+        self.tensor_scale = bool(tensor_scale)   # NVFP4 per-tensor FP32 second-level scale
+        self.entry_at = entry_at                 # entry_frozen only
         self._tab = {}      # device -> dict of plain tensors (not buffers)
-        self._s_idx = None  # carry state, lives only within one forward pass
+        self._s_idx = None  # carry / entry_frozen state, lives only within one forward pass
+        self._s_t = None    # entry_frozen + tensor_scale: frozen per-tensor scale (0-d fp32)
         self._k = 0         # boundary counter within one forward (0-based)
         # fixed: long tensor [K, nb] of UE4M3 indices, K = number of boundaries
         self._fixed_idx = None if fixed_idx is None else fixed_idx.long().cpu()
@@ -89,9 +114,34 @@ class NVFP4State(nn.Module):
                 ue4m3=u, ue4m3_mid=(u[1:] + u[:-1]) / 2)
         return self._tab[device]
 
-    def reset(self):
+    def reset(self, h=None):
+        """Called once per forward at the first recursion entry. `h` (the state
+        entering the first looped block) is only used by entry_frozen with
+        entry_at=loop_input; every other rule ignores it."""
         self._s_idx = None
+        self._s_t = None
         self._k = 0
+        if self.scale_rule == "entry_frozen" and self.entry_at == "loop_input" and h is not None and not self.calibrate:
+            t = self._tables(h.device)
+            u = h.detach().float().view(*h.shape[:-1], h.shape[-1] // BLOCK, BLOCK)
+            amax = u.abs().amax(-1)
+            s_t = self._tensor_scale(amax) if self.tensor_scale else None
+            self._s_idx, self._s_t = self._amax_scale_idx(t, amax, s_t), s_t
+
+    # ------------------------------------------------------------------ scale fits
+    @staticmethod
+    def _tensor_scale(amax):
+        """NVFP4 second-level per-tensor FP32 scale: block amax / (6*s_t) <= 448
+        by construction. Detached: the scale is a constant for the STE, exactly
+        like the UE4M3 index."""
+        return (amax.detach().max() / (6.0 * 448.0)).clamp(min=2.0 ** -20)
+
+    @staticmethod
+    def _amax_scale_idx(t, amax, s_t=None):
+        """UE4M3 index of the per-block scale re-fit from amax; s_t=None is the
+        original (no tensor scale) expression, kept verbatim for bit-exactness."""
+        x = amax / 6 if s_t is None else amax / (6.0 * s_t)
+        return torch.searchsorted(t["ue4m3_mid"], x.clamp(min=2.0 ** -9, max=448.0).contiguous())
 
     # ------------------------------------------------------------------ calibrate
     def _record(self, h, amax):
@@ -156,12 +206,21 @@ class NVFP4State(nn.Module):
             self._record(h, amax)
             self._k += 1
             return h
-        s_amax_idx = torch.searchsorted(t["ue4m3_mid"], (amax / 6).clamp(min=2.0 ** -9, max=448.0).contiguous())
+        s_t = None
+        if self.tensor_scale:
+            frozen = self.scale_rule == "entry_frozen" and self._s_t is not None
+            s_t = self._s_t if frozen else self._tensor_scale(amax)
+        s_amax_idx = self._amax_scale_idx(t, amax, s_t)
         if self.scale_rule == "fixed":
             k = self._k
             assert k < self._fixed_idx.shape[0], f"boundary {k} beyond fixed table K={self._fixed_idx.shape[0]} (reset() missing?)"
             assert self._fixed_idx.shape[1] == amax.shape[-1], "fixed table block count != hidden/16"
             s_idx = self._fixed_idx[k].to(h.device)          # [nb], broadcasts over tokens
+        elif self.scale_rule == "entry_frozen":
+            if self._s_idx is None:                           # rollout entry (boundary0) unless reset(h) already fixed it
+                self._s_idx, self._s_t = s_amax_idx.detach(), s_t
+            assert self._s_idx.shape == amax.shape, f"entry_frozen scale shape {tuple(self._s_idx.shape)} != {tuple(amax.shape)} (reset() missing?)"
+            s_idx, s_t = self._s_idx, self._s_t
         elif self.scale_rule == "amax" or self._s_idx is None:
             s_idx = s_amax_idx
         else:
@@ -175,6 +234,8 @@ class NVFP4State(nn.Module):
             self._s_idx = s_idx.detach()
         self._k += 1
         s = t["ue4m3"][s_idx].unsqueeze(-1)
+        if s_t is not None:
+            s = s * s_t                                       # decode = E2M1 * UE4M3 * per-tensor FP32
         q = torch.searchsorted(t["e2m1_mid"], (u / s).contiguous())
         hard = (t["e2m1"][q] * s).view(shape)
         soft = ((u / s).clamp(-6.0, 6.0) * s).view(shape)

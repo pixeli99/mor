@@ -167,7 +167,7 @@ class LlamaModel(LlamaPreTrainedModel):
                 loop_attn_state = self.loop_attn.init_state(hidden_states)
 
             if self.nvfp4_state is not None and layer_idx == self.nvfp4_start:
-                self.nvfp4_state.reset()  # carry scale re-anchors per forward
+                self.nvfp4_state.reset(hidden_states)  # carry scale re-anchors per forward; entry_frozen(loop_input) fits here
 
             if self.gradient_checkpointing and self.training:
                 layer_outputs = self._gradient_checkpointing_func(
@@ -409,6 +409,10 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         ns = cfg.nvfp4_state
         rule = ns.get("scale", "amax")
         kw = {}
+        if ns.get("tensor_scale"):          # NVFP4 per-tensor FP32 second-level scale (off by default)
+            kw["tensor_scale"] = True
+        if ns.get("entry_at"):              # entry_frozen only: boundary0 (default) | loop_input
+            kw["entry_at"] = str(ns.get("entry_at"))
         if rule == "fixed":
             # frozen per-(boundary, block) scale: calibrate (record, pass-through)
             # or load the table written by calibrate_nvfp4_fixed.py
