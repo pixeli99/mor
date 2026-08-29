@@ -406,7 +406,24 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
             base_depth = (n_layers - prelude - coda) // num_recursion
         else:
             raise ValueError(f"nvfp4_state supports cycle/middle_cycle sharing, got {sharing}")
-        self.model.nvfp4_state = NVFP4State(scale_rule=cfg.nvfp4_state.get("scale", "amax"))
+        ns = cfg.nvfp4_state
+        rule = ns.get("scale", "amax")
+        kw = {}
+        if rule == "fixed":
+            # frozen per-(boundary, block) scale: calibrate (record, pass-through)
+            # or load the table written by calibrate_nvfp4_fixed.py
+            if ns.get("calibrate"):
+                kw["calibrate"] = True
+            else:
+                import os
+                from paths import SAVE_DIR, PROJECT_ROOT
+                from model.nvfp4_state import load_fixed_scale
+                path = ns.get("fixed_scale_path") or os.path.join(SAVE_DIR, "pretrain", cfg.name, "nvfp4_fixed_scale.pt")
+                if not os.path.isabs(path):
+                    path = os.path.join(PROJECT_ROOT, path)
+                kw["fixed_idx"], _ = load_fixed_scale(path, ns.get("fixed_percentile", 99.9), expected_boundaries=num_recursion)
+                self.nvfp4_fixed_scale_path = path
+        self.model.nvfp4_state = NVFP4State(scale_rule=rule, **kw)
         self.model.nvfp4_start = prelude
         self.model.nvfp4_ends = {prelude + (r + 1) * base_depth - 1 for r in range(num_recursion)}
         return self
