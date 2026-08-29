@@ -119,3 +119,4 @@ val_loss:
 nvfp4_state:
   enable: true
   scale: amax
+  tensor_scale: true   # PTQ on the BF16 ckpt: amax+tensor_scale 2.9348 < amax 2.9502 (logs/e0/ptq_amaxts.json)
